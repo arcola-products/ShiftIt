@@ -7,17 +7,21 @@ namespace ShiftIt.Services;
 /// <summary>
 /// Orchestrates a sweep: for each configured pair, finds files in the hot root
 /// that are older than the age threshold, mirrors their relative path under the
-/// archive root, delegates the transfer to <see cref="FileMover"/>, and finally
+/// archive root, delegates the transfer to <see cref="IFileMover"/>, and finally
 /// prunes folders left empty in the hot tree.
+///
+/// Per-file detail is left to the mover (Debug, file log only). The scanner
+/// emits a single aggregated summary per pair — the level rises to Warning when
+/// anything failed or the pair was aborted — so the Event Log stays readable.
 /// </summary>
 public sealed class ArchiveScanner : IArchiveScanner
 {
-    private readonly FileMover _mover;
+    private readonly IFileMover _mover;
     private readonly IOptionsMonitor<ArchiveOptions> _options;
     private readonly ILogger<ArchiveScanner> _logger;
 
     public ArchiveScanner(
-        FileMover mover,
+        IFileMover mover,
         IOptionsMonitor<ArchiveOptions> options,
         ILogger<ArchiveScanner> logger)
     {
@@ -55,46 +59,53 @@ public sealed class ArchiveScanner : IArchiveScanner
 
         var archiveRoot = Path.GetFullPath(pair.ArchiveRoot);
         int moved = 0, skipped = 0, failed = 0;
+        string? abortReason = null;
 
-        foreach (var file in Directory.EnumerateFiles(hotRoot, "*", SearchOption.AllDirectories))
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            // Skip our own in-flight temp files from a previous interrupted run.
-            if (file.EndsWith(".archtmp", StringComparison.OrdinalIgnoreCase))
+            foreach (var file in Directory.EnumerateFiles(hotRoot, "*", SearchOption.AllDirectories))
             {
-                continue;
-            }
+                cancellationToken.ThrowIfCancellationRequested();
 
-            DateTime lastWriteUtc;
-            try
-            {
-                lastWriteUtc = File.GetLastWriteTimeUtc(file);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "[{Pair}] Could not read timestamp for {File}.", pair.Name, file);
-                failed++;
-                continue;
-            }
+                // Skip our own in-flight temp files from a previous interrupted run.
+                if (file.EndsWith(".archtmp", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
 
-            if (lastWriteUtc > cutoffUtc)
-            {
-                continue; // Not old enough yet.
+                DateTime lastWriteUtc;
+                try
+                {
+                    lastWriteUtc = File.GetLastWriteTimeUtc(file);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[{Pair}] Could not read timestamp for {File}.", pair.Name, file);
+                    failed++;
+                    continue;
+                }
+
+                if (lastWriteUtc > cutoffUtc)
+                {
+                    continue; // Not old enough yet.
+                }
+
+                var relativePath = Path.GetRelativePath(hotRoot, file);
+                var destination = Path.Combine(archiveRoot, relativePath);
+
+                var result = await _mover.MoveAsync(file, destination, cancellationToken);
+                switch (result)
+                {
+                    case MoveResult.Moved: moved++; break;
+                    case MoveResult.SkippedExists: skipped++; break;
+                    default: failed++; break;
+                }
             }
-
-            var relativePath = Path.GetRelativePath(hotRoot, file);
-            var destination = Path.Combine(archiveRoot, relativePath);
-
-            var result = await _mover.MoveAsync(
-                file, destination, options.VerifyWithHash, cancellationToken);
-
-            switch (result)
-            {
-                case MoveResult.Moved: moved++; break;
-                case MoveResult.SkippedExists: skipped++; break;
-                default: failed++; break;
-            }
+        }
+        catch (PairAbortedException ex)
+        {
+            // Destination full or gone: stop this pair, keep the reason for the summary.
+            abortReason = ex.Message;
         }
 
         if (options.RemoveEmptyHotFolders)
@@ -102,9 +113,29 @@ public sealed class ArchiveScanner : IArchiveScanner
             RemoveEmptyDirectories(hotRoot, hotRoot);
         }
 
-        _logger.LogInformation(
-            "[{Pair}] Sweep complete: {Moved} moved, {Skipped} skipped, {Failed} failed.",
-            pair.Name, moved, skipped, failed);
+        LogSummary(pair.Name, moved, skipped, failed, abortReason);
+    }
+
+    private void LogSummary(string pair, int moved, int skipped, int failed, string? abortReason)
+    {
+        if (abortReason is not null)
+        {
+            _logger.LogWarning(
+                "[{Pair}] Sweep aborted ({Reason}): {Moved} moved, {Skipped} skipped, {Failed} failed before stopping.",
+                pair, abortReason, moved, skipped, failed);
+        }
+        else if (failed > 0)
+        {
+            _logger.LogWarning(
+                "[{Pair}] Sweep completed with errors: {Moved} moved, {Skipped} skipped, {Failed} failed.",
+                pair, moved, skipped, failed);
+        }
+        else
+        {
+            _logger.LogInformation(
+                "[{Pair}] Sweep complete: {Moved} moved, {Skipped} skipped, {Failed} failed.",
+                pair, moved, skipped, failed);
+        }
     }
 
     /// <summary>

@@ -8,10 +8,14 @@ public sealed class TempDir : IDisposable
 {
     public string Path { get; }
 
-    public TempDir()
+    /// <param name="baseRoot">
+    /// Parent directory for the unique temp folder. Defaults to the local temp
+    /// path; pass an SMB root to place the directory on a network share.
+    /// </param>
+    public TempDir(string? baseRoot = null)
     {
-        Path = System.IO.Path.Combine(
-            System.IO.Path.GetTempPath(), "shiftit-tests", Guid.NewGuid().ToString("N"));
+        var root = baseRoot ?? System.IO.Path.Combine(System.IO.Path.GetTempPath(), "shiftit-tests");
+        Path = System.IO.Path.Combine(root, Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Path);
     }
 

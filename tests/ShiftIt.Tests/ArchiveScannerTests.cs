@@ -7,13 +7,11 @@ namespace ShiftIt.Tests;
 
 public sealed class ArchiveScannerTests
 {
-    private static ArchiveScanner CreateScanner(ArchiveOptions options)
+    private static ArchiveScanner CreateScanner(ArchiveOptions options, IFileMover? mover = null)
     {
-        var mover = new FileMover(NullLogger<FileMover>.Instance);
-        return new ArchiveScanner(
-            mover,
-            new StaticOptionsMonitor<ArchiveOptions>(options),
-            NullLogger<ArchiveScanner>.Instance);
+        var monitor = new StaticOptionsMonitor<ArchiveOptions>(options);
+        mover ??= new FileMover(NullLogger<FileMover>.Instance, monitor);
+        return new ArchiveScanner(mover, monitor, NullLogger<ArchiveScanner>.Instance);
     }
 
     private static ArchiveOptions OptionsFor(
@@ -22,19 +20,23 @@ public sealed class ArchiveScannerTests
         MinAgeDays = minAgeDays,
         RemoveEmptyHotFolders = removeEmpty,
         VerifyWithHash = false,
+        MaxRetries = 0,
         Pairs = [new TargetPair { Name = "Test", HotRoot = hotRoot, ArchiveRoot = archiveRoot }],
     };
 
     private static void Age(string path, int days) =>
         File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddDays(-days));
 
-    [Fact]
-    public async Task RunSweep_MovesAgedFiles_AndMirrorsFolderStructure()
+    [SkippableTheory]
+    [InlineData(DestKind.Local)] // local -> local
+    [InlineData(DestKind.Smb)]   // local -> SMB share
+    public async Task RunSweep_MovesAgedFiles_AndMirrorsFolderStructure(DestKind dest)
     {
-        using var temp = new TempDir();
-        var hot = temp.Combine("hot");
-        var archive = temp.Combine("archive");
-        var aged = temp.WriteFile("hot/2024/Q1/old.txt", "old");
+        using var hotDir = new TempDir();
+        using var archiveDir = Targets.CreateArchive(dest);
+        var hot = hotDir.Path;
+        var archive = archiveDir.Path;
+        var aged = hotDir.WriteFile("2024/Q1/old.txt", "old");
         Age(aged, 40);
 
         await CreateScanner(OptionsFor(hot, archive)).RunSweepAsync(CancellationToken.None);
@@ -127,5 +129,76 @@ public sealed class ArchiveScannerTests
 
         Assert.False(File.Exists(justNow));
         Assert.True(File.Exists(Path.Combine(archive, "now.txt")));
+    }
+
+    [Fact]
+    public async Task RunSweep_StopsPair_WhenMoverAborts()
+    {
+        using var temp = new TempDir();
+        var hot = temp.Combine("hot");
+        var archive = temp.Combine("archive");
+        foreach (var i in Enumerable.Range(0, 5))
+        {
+            Age(temp.WriteFile($"hot/file{i}.txt"), 40);
+        }
+
+        // Mover aborts (e.g. destination full) on the very first file.
+        var mover = new AbortingFileMover(abortOnCall: 1);
+
+        // Should not throw, and should stop after the abort rather than calling
+        // the mover for every remaining file.
+        await CreateScanner(OptionsFor(hot, archive), mover).RunSweepAsync(CancellationToken.None);
+
+        Assert.Equal(1, mover.Calls);                                  // stopped immediately
+        Assert.Equal(5, Directory.GetFiles(hot).Length);              // all sources left intact
+    }
+
+    [SkippableFact]
+    public async Task RunSweep_AbortsPair_AndKeepsSources_WhenArchiveDriveMissing()
+    {
+        var missingDrive = FirstUnusedDriveRoot();
+        Skip.If(missingDrive is null, "No unused drive letter available to simulate a missing volume.");
+
+        using var hotDir = new TempDir();
+        var aged = hotDir.WriteFile("old.txt");
+        Age(aged, 40);
+        var archive = Path.Combine(missingDrive!, "shiftit-archive");
+
+        // A real FileMover hitting a non-existent drive must not throw out of the sweep.
+        var ex = await Record.ExceptionAsync(() =>
+            CreateScanner(OptionsFor(hotDir.Path, archive)).RunSweepAsync(CancellationToken.None));
+
+        Assert.Null(ex);
+        Assert.True(File.Exists(aged));  // source preserved when the destination is unreachable
+    }
+
+    /// <summary>Finds a drive root (e.g. "Q:\") that does not exist, or null if none.</summary>
+    private static string? FirstUnusedDriveRoot()
+    {
+        var used = DriveInfo.GetDrives().Select(d => char.ToUpperInvariant(d.Name[0])).ToHashSet();
+        for (var c = 'Z'; c >= 'D'; c--)
+        {
+            if (!used.Contains(c))
+            {
+                return $"{c}:\\";
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Throws <see cref="PairAbortedException"/> on the Nth call.</summary>
+    private sealed class AbortingFileMover(int abortOnCall) : IFileMover
+    {
+        public int Calls { get; private set; }
+
+        public Task<MoveResult> MoveAsync(string sourcePath, string destinationPath, CancellationToken ct)
+        {
+            Calls++;
+            if (Calls >= abortOnCall)
+            {
+                throw new PairAbortedException("destination volume is full");
+            }
+            return Task.FromResult(MoveResult.Moved);
+        }
     }
 }

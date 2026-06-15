@@ -29,6 +29,33 @@ public sealed class ArchiveOptions
     /// </summary>
     public bool VerifyWithHash { get; set; } = false;
 
+    /// <summary>
+    /// Number of times a file operation is retried after a transient failure
+    /// (e.g. a sharing violation or a momentary network drop) before giving up.
+    /// </summary>
+    [Range(0, 20)]
+    public int MaxRetries { get; set; } = 3;
+
+    /// <summary>
+    /// Base delay between transient-failure retries, in seconds. The wait grows
+    /// exponentially per attempt (delay, 2x, 4x, ...).
+    /// </summary>
+    [Range(0, 600)]
+    public double RetryDelaySeconds { get; set; } = 2;
+
+    /// <summary>
+    /// Directory for the detailed rolling file log. Relative paths are resolved
+    /// against the application's base directory. A daily log file is written here.
+    /// </summary>
+    public string LogDirectory { get; set; } = "logs";
+
+    /// <summary>
+    /// How many days of rolling file logs to keep. Older daily log files are
+    /// deleted automatically.
+    /// </summary>
+    [Range(1, 3650)]
+    public int LogRetentionDays { get; set; } = 14;
+
     /// <summary>The hot-to-archive root mappings to process each sweep.</summary>
     [Required, MinLength(1)]
     public List<TargetPair> Pairs { get; set; } = new();

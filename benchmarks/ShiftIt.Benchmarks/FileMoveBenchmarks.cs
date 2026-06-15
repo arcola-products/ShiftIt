@@ -3,20 +3,35 @@ using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Jobs;
 using BenchmarkDotNet.Toolchains.InProcess.Emit;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using ShiftIt.Configuration;
 using ShiftIt.Services;
 
 namespace ShiftIt.Benchmarks;
 
+/// <summary>Archive destination for a benchmark run.</summary>
+public enum Target
+{
+    /// <summary>Local disk (same machine as the source).</summary>
+    Local,
+
+    /// <summary>SMB share, exercising a real network round-trip.</summary>
+    Smb,
+}
+
 /// <summary>
 /// Measures <see cref="FileMover.MoveAsync"/> (copy -> verify -> rename -> delete)
-/// across a range of file sizes, with hash verification off and on. The source
-/// file is (re)created in IterationSetup so it is not part of the measurement;
-/// each measured invocation performs exactly one move.
+/// across file sizes, with hash verification off/on, to a local and an SMB
+/// destination. The source (always local) is recreated in IterationSetup so it
+/// is not part of the measurement; each measured invocation performs one move.
 /// </summary>
 [MemoryDiagnoser]
 [Config(typeof(Config))]
 public class FileMoveBenchmarks
 {
+    // The SMB share used for the network destination (must be writable).
+    private const string SmbRoot = @"S:\The Archive\temp";
+
     private sealed class Config : ManualConfig
     {
         public Config() => AddJob(Job.Default
@@ -36,8 +51,12 @@ public class FileMoveBenchmarks
     [Params(false, true)]
     public bool VerifyWithHash;
 
+    [Params(Target.Local, Target.Smb)]
+    public Target Destination;
+
     private FileMover _mover = null!;
-    private string _root = null!;
+    private string _sourceRoot = null!;
+    private string _archiveRoot = null!;
     private string _source = null!;
     private string _dest = null!;
     private byte[] _payload = null!;
@@ -45,15 +64,23 @@ public class FileMoveBenchmarks
     [GlobalSetup]
     public void GlobalSetup()
     {
-        _mover = new FileMover(NullLogger<FileMover>.Instance);
-        _root = Path.Combine(Path.GetTempPath(), "shiftit-bench", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(_root);
+        var options = new ArchiveOptions { VerifyWithHash = VerifyWithHash, MaxRetries = 0 };
+        _mover = new FileMover(
+            NullLogger<FileMover>.Instance,
+            new StaticOptionsMonitor<ArchiveOptions>(options));
+
+        var id = Guid.NewGuid().ToString("N");
+        _sourceRoot = Path.Combine(Path.GetTempPath(), "shiftit-bench", id);   // source always local
+        var archiveBase = Destination == Target.Smb ? SmbRoot : Path.GetTempPath();
+        _archiveRoot = Path.Combine(archiveBase, "shiftit-bench-archive", id);
+        Directory.CreateDirectory(_sourceRoot);
+        Directory.CreateDirectory(_archiveRoot);
 
         _payload = new byte[FileSize];
         new Random(42).NextBytes(_payload);
 
-        _source = Path.Combine(_root, "source.bin");
-        _dest = Path.Combine(_root, "archive", "source.bin");
+        _source = Path.Combine(_sourceRoot, "source.bin");
+        _dest = Path.Combine(_archiveRoot, "archive", "source.bin");
     }
 
     [IterationSetup]
@@ -70,21 +97,35 @@ public class FileMoveBenchmarks
 
     [Benchmark]
     public async Task Move() =>
-        await _mover.MoveAsync(_source, _dest, VerifyWithHash, CancellationToken.None);
+        await _mover.MoveAsync(_source, _dest, CancellationToken.None);
 
     [GlobalCleanup]
     public void GlobalCleanup()
     {
+        TryDeleteTree(_sourceRoot);
+        TryDeleteTree(_archiveRoot);
+    }
+
+    private static void TryDeleteTree(string path)
+    {
         try
         {
-            if (Directory.Exists(_root))
+            if (Directory.Exists(path))
             {
-                Directory.Delete(_root, recursive: true);
+                Directory.Delete(path, recursive: true);
             }
         }
         catch
         {
             // Best-effort cleanup.
         }
+    }
+
+    /// <summary>Minimal fixed <see cref="IOptionsMonitor{T}"/> for the benchmark.</summary>
+    private sealed class StaticOptionsMonitor<T>(T value) : IOptionsMonitor<T>
+    {
+        public T CurrentValue { get; } = value;
+        public T Get(string? name) => CurrentValue;
+        public IDisposable? OnChange(Action<T, string?> listener) => null;
     }
 }

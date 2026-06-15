@@ -29,13 +29,24 @@ public class Worker : BackgroundService
         var interval = TimeSpan.FromMinutes(Math.Max(1, _options.CurrentValue.ScanIntervalMinutes));
         _logger.LogInformation("ShiftIt started. Sweep interval: {Interval}.", interval);
 
-        // Run once immediately, then on each tick.
-        await RunSweepSafelyAsync(stoppingToken);
-
-        using var timer = new PeriodicTimer(interval);
-        while (await timer.WaitForNextTickAsync(stoppingToken))
+        try
         {
+            // Run once immediately, then on each tick.
             await RunSweepSafelyAsync(stoppingToken);
+
+            using var timer = new PeriodicTimer(interval);
+            while (await timer.WaitForNextTickAsync(stoppingToken))
+            {
+                await RunSweepSafelyAsync(stoppingToken);
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Normal shutdown.
+        }
+        finally
+        {
+            _logger.LogInformation("ShiftIt stopping.");
         }
     }
 
