@@ -1,4 +1,4 @@
-namespace ArchiveSync.Services;
+namespace ShiftIt.Services;
 
 /// <summary>Outcome of attempting to move a single file to the archive.</summary>
 public enum MoveResult

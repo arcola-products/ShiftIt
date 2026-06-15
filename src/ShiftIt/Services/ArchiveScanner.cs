@@ -1,8 +1,8 @@
-using ArchiveSync.Configuration;
+using ShiftIt.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
-namespace ArchiveSync.Services;
+namespace ShiftIt.Services;
 
 /// <summary>
 /// Orchestrates a sweep: for each configured pair, finds files in the hot root

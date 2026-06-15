@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Options;
 
-namespace ArchiveSync.Configuration;
+namespace ShiftIt.Configuration;
 
 /// <summary>
 /// Validates relationships that data annotations cannot express: rooted paths,

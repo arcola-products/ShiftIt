@@ -1,6 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 
-namespace ArchiveSync.Configuration;
+namespace ShiftIt.Configuration;
 
 /// <summary>
 /// Root options bound from the "Archive" section of appsettings.json.

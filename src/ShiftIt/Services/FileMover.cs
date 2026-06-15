@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using Microsoft.Extensions.Logging;
 
-namespace ArchiveSync.Services;
+namespace ShiftIt.Services;
 
 /// <summary>
 /// Moves a single file to its archive destination using a crash- and

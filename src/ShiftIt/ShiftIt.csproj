@@ -4,7 +4,9 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <UserSecretsId>dotnet-ArchiveSync-fc566521-0422-4d2f-8ca4-6da6ba7b7306</UserSecretsId>
+    <RootNamespace>ShiftIt</RootNamespace>
+    <AssemblyName>ShiftIt</AssemblyName>
+    <UserSecretsId>dotnet-ShiftIt-fc566521-0422-4d2f-8ca4-6da6ba7b7306</UserSecretsId>
   </PropertyGroup>
 
   <ItemGroup>

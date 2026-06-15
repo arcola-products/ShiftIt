@@ -1,4 +1,4 @@
-namespace ArchiveSync.Services;
+namespace ShiftIt.Services;
 
 /// <summary>Runs one full sweep across all configured hot-to-archive pairs.</summary>
 public interface IArchiveScanner

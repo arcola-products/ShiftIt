@@ -1,12 +1,12 @@
-using ArchiveSync;
-using ArchiveSync.Configuration;
-using ArchiveSync.Services;
+using ShiftIt;
+using ShiftIt.Configuration;
+using ShiftIt.Services;
 using Microsoft.Extensions.Options;
 
 var builder = Host.CreateApplicationBuilder(args);
 
 // Run as a Windows Service in production; runs as a console app in development.
-builder.Services.AddWindowsService(options => options.ServiceName = "ArchiveSync");
+builder.Services.AddWindowsService(options => options.ServiceName = "ShiftIt");
 
 // Bind and validate configuration.
 builder.Services

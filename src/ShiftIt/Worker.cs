@@ -1,8 +1,8 @@
-using ArchiveSync.Configuration;
-using ArchiveSync.Services;
+using ShiftIt.Configuration;
+using ShiftIt.Services;
 using Microsoft.Extensions.Options;
 
-namespace ArchiveSync;
+namespace ShiftIt;
 
 /// <summary>
 /// Background service that runs an archive sweep on startup and then on a fixed
@@ -27,7 +27,7 @@ public class Worker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var interval = TimeSpan.FromMinutes(Math.Max(1, _options.CurrentValue.ScanIntervalMinutes));
-        _logger.LogInformation("ArchiveSync started. Sweep interval: {Interval}.", interval);
+        _logger.LogInformation("ShiftIt started. Sweep interval: {Interval}.", interval);
 
         // Run once immediately, then on each tick.
         await RunSweepSafelyAsync(stoppingToken);

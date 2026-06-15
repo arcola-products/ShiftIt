@@ -43,6 +43,9 @@ packages/
 .scratch/
 *.log
 
+# BenchmarkDotNet generated reports
+BenchmarkDotNet.Artifacts/
+
 # OS
 .DS_Store
 Thumbs.db
