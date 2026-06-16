@@ -131,6 +131,31 @@ public sealed class ArchiveScannerTests
         Assert.True(File.Exists(Path.Combine(archive, "now.txt")));
     }
 
+    [Fact]
+    public async Task RunSweep_CopyOnly_CopiesButKeepsSource_AndIsIdempotent()
+    {
+        using var hotDir = new TempDir();
+        using var archiveDir = new TempDir();
+        var aged = hotDir.WriteFile("a/b/old.txt", "payload");
+        Age(aged, 40);
+
+        var options = OptionsFor(hotDir.Path, archiveDir.Path);
+        options.CopyOnly = true;
+
+        await CreateScanner(options).RunSweepAsync(CancellationToken.None);
+
+        var archived = Path.Combine(archiveDir.Path, "a", "b", "old.txt");
+        Assert.True(File.Exists(aged));                                          // source kept
+        Assert.True(File.Exists(archived));                                      // copy made
+        Assert.Equal("payload", File.ReadAllText(archived));
+        Assert.True(Directory.Exists(Path.Combine(hotDir.Path, "a", "b")));      // folder not pruned
+
+        // Second sweep is idempotent: source stays, no duplicate archived file.
+        await CreateScanner(options).RunSweepAsync(CancellationToken.None);
+        Assert.True(File.Exists(aged));
+        Assert.Single(Directory.GetFiles(archiveDir.Path, "*", SearchOption.AllDirectories));
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(8)]

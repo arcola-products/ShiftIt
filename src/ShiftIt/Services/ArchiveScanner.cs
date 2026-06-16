@@ -106,6 +106,9 @@ public sealed class ArchiveScanner : IArchiveScanner
                         stats.IncMoved();
                         emptiedDirs.TryAdd(Path.GetDirectoryName(source)!, 0);
                         break;
+                    case MoveResult.Copied:
+                        stats.IncCopied(); // source kept, so the folder isn't emptied
+                        break;
                     case MoveResult.SkippedExists:
                         stats.IncSkipped();
                         break;
@@ -129,7 +132,7 @@ public sealed class ArchiveScanner : IArchiveScanner
             PruneEmptyDirectories(emptiedDirs.Keys, hotRoot);
         }
 
-        LogSummary(pair.Name, stats.Moved, stats.Skipped, stats.Failed, abortReason);
+        LogSummary(pair.Name, stats, abortReason);
     }
 
     /// <summary>
@@ -169,25 +172,25 @@ public sealed class ArchiveScanner : IArchiveScanner
         }
     }
 
-    private void LogSummary(string pair, int moved, int skipped, int failed, string? abortReason)
+    private void LogSummary(string pair, SweepStats stats, string? abortReason)
     {
         if (abortReason is not null)
         {
             _logger.LogWarning(
-                "[{Pair}] Sweep aborted ({Reason}): {Moved} moved, {Skipped} skipped, {Failed} failed before stopping.",
-                pair, abortReason, moved, skipped, failed);
+                "[{Pair}] Sweep aborted ({Reason}): {Moved} moved, {Copied} copied, {Skipped} skipped, {Failed} failed before stopping.",
+                pair, abortReason, stats.Moved, stats.Copied, stats.Skipped, stats.Failed);
         }
-        else if (failed > 0)
+        else if (stats.Failed > 0)
         {
             _logger.LogWarning(
-                "[{Pair}] Sweep completed with errors: {Moved} moved, {Skipped} skipped, {Failed} failed.",
-                pair, moved, skipped, failed);
+                "[{Pair}] Sweep completed with errors: {Moved} moved, {Copied} copied, {Skipped} skipped, {Failed} failed.",
+                pair, stats.Moved, stats.Copied, stats.Skipped, stats.Failed);
         }
         else
         {
             _logger.LogInformation(
-                "[{Pair}] Sweep complete: {Moved} moved, {Skipped} skipped, {Failed} failed.",
-                pair, moved, skipped, failed);
+                "[{Pair}] Sweep complete: {Moved} moved, {Copied} copied, {Skipped} skipped, {Failed} failed.",
+                pair, stats.Moved, stats.Copied, stats.Skipped, stats.Failed);
         }
     }
 
@@ -229,14 +232,17 @@ public sealed class ArchiveScanner : IArchiveScanner
     private sealed class SweepStats
     {
         private int _moved;
+        private int _copied;
         private int _skipped;
         private int _failed;
 
         public int Moved => Volatile.Read(ref _moved);
+        public int Copied => Volatile.Read(ref _copied);
         public int Skipped => Volatile.Read(ref _skipped);
         public int Failed => Volatile.Read(ref _failed);
 
         public void IncMoved() => Interlocked.Increment(ref _moved);
+        public void IncCopied() => Interlocked.Increment(ref _copied);
         public void IncSkipped() => Interlocked.Increment(ref _skipped);
         public void IncFailed() => Interlocked.Increment(ref _failed);
     }

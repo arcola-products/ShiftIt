@@ -51,6 +51,7 @@ All settings live under the `Archive` section of
     "ScanIntervalMinutes": 60,   // how often a sweep runs
     "MinAgeDays": 30,            // archive files older than this (by LastWriteTimeUtc); 0 = everything
     "RemoveEmptyHotFolders": true,
+    "CopyOnly": false,           // safe/test mode: copy & verify but never delete the source
     "VerifyWithHash": false,     // false = length check; true = also SHA-256
     "MaxRetries": 3,             // retries for transient errors (network blips, file locks)
     "RetryDelaySeconds": 2,      // base backoff; doubles each attempt (2s, 4s, 8s...)
@@ -75,6 +76,7 @@ via `IOptionsMonitor`, so edits are picked up without a restart.
 | `ScanIntervalMinutes` | Minutes between sweeps. A sweep also runs immediately on start. |
 | `MinAgeDays` | Minimum file age (by `LastWriteTimeUtc`) to be archived. `0` archives everything present. |
 | `RemoveEmptyHotFolders` | Prune folders emptied by a sweep (hot roots are never removed). |
+| `CopyOnly` | Safe/test mode: copy and verify into the archive but never delete the source. Re-runs skip files already present, so it's idempotent. |
 | `VerifyWithHash` | Verify copies with SHA-256 in addition to byte length (slower — see Benchmarks). |
 | `MaxRetries` | Retries after a transient failure (sharing violation, momentary network drop) before giving up. |
 | `RetryDelaySeconds` | Base delay between retries; grows exponentially per attempt. |

@@ -24,6 +24,14 @@ public sealed class ArchiveOptions
     public bool RemoveEmptyHotFolders { get; set; } = true;
 
     /// <summary>
+    /// Safe / test mode: copy and verify files into the archive but never delete
+    /// the source. Existing archived files are still skipped, so repeated runs
+    /// are idempotent. Useful for validating a target without touching the hot
+    /// data.
+    /// </summary>
+    public bool CopyOnly { get; set; } = false;
+
+    /// <summary>
     /// When true, the copied file is verified against the source with a SHA-256
     /// hash. When false, only the byte length is compared (faster).
     /// </summary>

@@ -67,6 +67,15 @@ public sealed class FileMover : IFileMover
             await Retry(() => { File.Move(tempPath, destinationPath); return Task.CompletedTask; },
                 maxRetries, baseDelay, sourcePath, cancellationToken);
 
+            // Copy-only (safe/test) mode: keep the source untouched.
+            if (options.CopyOnly)
+            {
+                _logger.LogDebug(
+                    "Copied {Source} -> {Destination} (copy-only; source kept).",
+                    sourcePath, destinationPath);
+                return MoveResult.Copied;
+            }
+
             // 5. Source removed last, only after the copy is durable.
             try
             {
