@@ -14,21 +14,29 @@ public sealed class FileMoverTests
         return new FileMover(NullLogger<FileMover>.Instance, new StaticOptionsMonitor<ArchiveOptions>(options));
     }
 
+    // The scanner owns directory creation, so the mover's caller ensures the
+    // destination directory exists before invoking it.
+    private static string EnsureDest(string destination)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        return destination;
+    }
+
     [SkippableTheory]
     [InlineData(DestKind.Local)] // local -> local
     [InlineData(DestKind.Smb)]   // local -> SMB share
-    public async Task MoveAsync_MovesFile_AndCreatesDestinationDirectory(DestKind dest)
+    public async Task MoveAsync_MovesFileToMirroredPath(DestKind dest)
     {
         using var hot = new TempDir();                  // source is always local
         using var archive = Targets.CreateArchive(dest); // local or SMB
         var source = hot.WriteFile("file.txt", "hello");
-        var destination = archive.Combine("nested", "file.txt");
+        var destination = EnsureDest(archive.Combine("nested", "file.txt"));
 
         var result = await CreateMover().MoveAsync(source, destination, CancellationToken.None);
 
         Assert.Equal(MoveResult.Moved, result);
         Assert.False(File.Exists(source));            // source removed last
-        Assert.True(File.Exists(destination));        // mirrored dir created
+        Assert.True(File.Exists(destination));
         Assert.Equal("hello", File.ReadAllText(destination));
     }
 
@@ -39,7 +47,7 @@ public sealed class FileMoverTests
         var source = temp.WriteFile("hot/file.txt");
         var stamp = DateTime.UtcNow.AddDays(-100);
         File.SetLastWriteTimeUtc(source, stamp);
-        var destination = temp.Combine("archive", "file.txt");
+        var destination = EnsureDest(temp.Combine("archive", "file.txt"));
 
         await CreateMover().MoveAsync(source, destination, CancellationToken.None);
 
@@ -82,7 +90,7 @@ public sealed class FileMoverTests
     {
         using var temp = new TempDir();
         var source = temp.WriteFile("hot/file.txt");
-        var destination = temp.Combine("archive", "file.txt");
+        var destination = EnsureDest(temp.Combine("archive", "file.txt"));
 
         await CreateMover().MoveAsync(source, destination, CancellationToken.None);
 

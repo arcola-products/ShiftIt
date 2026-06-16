@@ -87,12 +87,14 @@ public class FileMoveBenchmarks
     public void IterationSetup()
     {
         // Fresh source for each measured move; clear any prior destination.
+        // The scanner owns directory creation, so ensure the dir exists here.
         File.WriteAllBytes(_source, _payload);
         var destDir = Path.GetDirectoryName(_dest)!;
         if (Directory.Exists(destDir))
         {
             Directory.Delete(destDir, recursive: true);
         }
+        Directory.CreateDirectory(destDir);
     }
 
     [Benchmark]
@@ -119,13 +121,5 @@ public class FileMoveBenchmarks
         {
             // Best-effort cleanup.
         }
-    }
-
-    /// <summary>Minimal fixed <see cref="IOptionsMonitor{T}"/> for the benchmark.</summary>
-    private sealed class StaticOptionsMonitor<T>(T value) : IOptionsMonitor<T>
-    {
-        public T CurrentValue { get; } = value;
-        public T Get(string? name) => CurrentValue;
-        public IDisposable? OnChange(Action<T, string?> listener) => null;
     }
 }

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ShiftIt.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -8,7 +9,12 @@ namespace ShiftIt.Services;
 /// Orchestrates a sweep: for each configured pair, finds files in the hot root
 /// that are older than the age threshold, mirrors their relative path under the
 /// archive root, delegates the transfer to <see cref="IFileMover"/>, and finally
-/// prunes folders left empty in the hot tree.
+/// prunes folders left empty by the moves.
+///
+/// File ages come straight from the directory enumeration (no extra stat per
+/// file); each destination directory is created at most once per sweep; and
+/// moves can run concurrently (<see cref="ArchiveOptions.MaxParallelMoves"/>) to
+/// hide per-file latency on high-latency targets such as SMB shares.
 ///
 /// Per-file detail is left to the mover (Debug, file log only). The scanner
 /// emits a single aggregated summary per pair — the level rises to Warning when
@@ -58,62 +64,109 @@ public sealed class ArchiveScanner : IArchiveScanner
         }
 
         var archiveRoot = Path.GetFullPath(pair.ArchiveRoot);
-        int moved = 0, skipped = 0, failed = 0;
+        var stats = new SweepStats();
+        var ensuredDirs = new ConcurrentDictionary<string, Lazy<Task>>(StringComparer.OrdinalIgnoreCase);
+        var emptiedDirs = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
         string? abortReason = null;
+
+        // LastWriteTimeUtc comes from the enumeration data — no per-file stat.
+        // Skip leftover temp files from a previous interrupted run.
+        var eligible = new DirectoryInfo(hotRoot)
+            .EnumerateFiles("*", SearchOption.AllDirectories)
+            .Where(f => !f.Name.EndsWith(".archtmp", StringComparison.OrdinalIgnoreCase)
+                        && f.LastWriteTimeUtc <= cutoffUtc);
+
+        var parallelOptions = new ParallelOptions
+        {
+            MaxDegreeOfParallelism = Math.Max(1, options.MaxParallelMoves),
+            CancellationToken = cancellationToken,
+        };
 
         try
         {
-            foreach (var file in Directory.EnumerateFiles(hotRoot, "*", SearchOption.AllDirectories))
+            await Parallel.ForEachAsync(eligible, parallelOptions, async (fileInfo, token) =>
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                // Skip our own in-flight temp files from a previous interrupted run.
-                if (file.EndsWith(".archtmp", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                DateTime lastWriteUtc;
-                try
-                {
-                    lastWriteUtc = File.GetLastWriteTimeUtc(file);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "[{Pair}] Could not read timestamp for {File}.", pair.Name, file);
-                    failed++;
-                    continue;
-                }
-
-                if (lastWriteUtc > cutoffUtc)
-                {
-                    continue; // Not old enough yet.
-                }
-
-                var relativePath = Path.GetRelativePath(hotRoot, file);
+                var source = fileInfo.FullName;
+                var relativePath = Path.GetRelativePath(hotRoot, source);
                 var destination = Path.Combine(archiveRoot, relativePath);
+                var destinationDir = Path.GetDirectoryName(destination)!;
 
-                var result = await _mover.MoveAsync(file, destination, cancellationToken);
+                // Create each archive sub-directory at most once per sweep; all
+                // files targeting it await the same creation task (so concurrent
+                // movers never copy into a not-yet-created directory).
+                var ensure = ensuredDirs.GetOrAdd(
+                    destinationDir,
+                    d => new Lazy<Task>(() => EnsureDirectoryAsync(d, options, cancellationToken)));
+                await ensure.Value;
+
+                var result = await _mover.MoveAsync(source, destination, token);
                 switch (result)
                 {
-                    case MoveResult.Moved: moved++; break;
-                    case MoveResult.SkippedExists: skipped++; break;
-                    default: failed++; break;
+                    case MoveResult.Moved:
+                        stats.IncMoved();
+                        emptiedDirs.TryAdd(Path.GetDirectoryName(source)!, 0);
+                        break;
+                    case MoveResult.SkippedExists:
+                        stats.IncSkipped();
+                        break;
+                    default:
+                        stats.IncFailed();
+                        break;
                 }
-            }
+            });
         }
         catch (PairAbortedException ex)
         {
-            // Destination full or gone: stop this pair, keep the reason for the summary.
             abortReason = ex.Message;
+        }
+        catch (AggregateException ex) when (ex.InnerExceptions.OfType<PairAbortedException>().Any())
+        {
+            abortReason = ex.InnerExceptions.OfType<PairAbortedException>().First().Message;
         }
 
         if (options.RemoveEmptyHotFolders)
         {
-            RemoveEmptyDirectories(hotRoot, hotRoot);
+            PruneEmptyDirectories(emptiedDirs.Keys, hotRoot);
         }
 
-        LogSummary(pair.Name, moved, skipped, failed, abortReason);
+        LogSummary(pair.Name, stats.Moved, stats.Skipped, stats.Failed, abortReason);
+    }
+
+    /// <summary>
+    /// Ensures an archive sub-directory exists, retrying transient failures. A
+    /// hard failure (full, gone, denied) aborts the whole pair, since it affects
+    /// every file destined for that directory.
+    /// </summary>
+    private async Task EnsureDirectoryAsync(string dir, ArchiveOptions options, CancellationToken ct)
+    {
+        try
+        {
+            await Resilience.RunWithRetryAsync(
+                () => { Directory.CreateDirectory(dir); return Task.CompletedTask; },
+                options.MaxRetries,
+                TimeSpan.FromSeconds(options.RetryDelaySeconds),
+                isTransient: ex => FileErrors.Classify(ex) == FileErrorKind.Transient,
+                onRetry: (attempt, ex) => _logger.LogDebug(
+                    "Transient error creating {Dir} (attempt {Attempt}): {Message}. Retrying...",
+                    dir, attempt, ex.Message),
+                ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            var reason = FileErrors.Classify(ex) switch
+            {
+                FileErrorKind.DiskFull => "destination volume is full",
+                FileErrorKind.Inaccessible => "archive destination is inaccessible",
+                FileErrorKind.Permission => "permission denied creating the archive directory",
+                FileErrorKind.Transient => "archive destination is temporarily inaccessible (gave up after retries)",
+                _ => "could not create the archive directory",
+            };
+            throw new PairAbortedException(reason, ex);
+        }
     }
 
     private void LogSummary(string pair, int moved, int skipped, int failed, string? abortReason)
@@ -139,32 +192,52 @@ public sealed class ArchiveScanner : IArchiveScanner
     }
 
     /// <summary>
-    /// Depth-first removal of empty directories beneath (but never including)
-    /// <paramref name="root"/>.
+    /// Walks up from each directory a file was moved out of, deleting it (and any
+    /// parents it leaves empty) up to — but never including — the hot root. Only
+    /// directories touched this sweep are visited, so the whole tree is not
+    /// re-walked.
     /// </summary>
-    private void RemoveEmptyDirectories(string current, string root)
+    private void PruneEmptyDirectories(IEnumerable<string> startDirs, string hotRoot)
     {
-        foreach (var dir in Directory.EnumerateDirectories(current))
+        foreach (var start in startDirs)
         {
-            RemoveEmptyDirectories(dir, root);
-        }
-
-        if (string.Equals(current, root, StringComparison.OrdinalIgnoreCase))
-        {
-            return; // Never delete the hot root itself.
-        }
-
-        try
-        {
-            if (!Directory.EnumerateFileSystemEntries(current).Any())
+            var dir = start;
+            while (!string.Equals(dir, hotRoot, StringComparison.OrdinalIgnoreCase)
+                   && dir.StartsWith(hotRoot, StringComparison.OrdinalIgnoreCase))
             {
-                Directory.Delete(current);
-                _logger.LogDebug("Removed empty folder {Folder}.", current);
+                try
+                {
+                    if (!Directory.Exists(dir) || Directory.EnumerateFileSystemEntries(dir).Any())
+                    {
+                        break; // already gone, or not empty
+                    }
+
+                    Directory.Delete(dir);
+                    _logger.LogDebug("Removed empty folder {Folder}.", dir);
+                    dir = Path.GetDirectoryName(dir)!;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Could not remove folder {Folder}.", dir);
+                    break;
+                }
             }
         }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Could not remove folder {Folder}.", current);
-        }
+    }
+
+    /// <summary>Thread-safe move counters for a single pair's sweep.</summary>
+    private sealed class SweepStats
+    {
+        private int _moved;
+        private int _skipped;
+        private int _failed;
+
+        public int Moved => Volatile.Read(ref _moved);
+        public int Skipped => Volatile.Read(ref _skipped);
+        public int Failed => Volatile.Read(ref _failed);
+
+        public void IncMoved() => Interlocked.Increment(ref _moved);
+        public void IncSkipped() => Interlocked.Increment(ref _skipped);
+        public void IncFailed() => Interlocked.Increment(ref _failed);
     }
 }

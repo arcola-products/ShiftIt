@@ -8,8 +8,20 @@ public static class Resilience
     /// <param name="baseDelay">Delay before the first retry; doubles each attempt.</param>
     /// <param name="isTransient">Returns true for exceptions worth retrying.</param>
     /// <param name="onRetry">Invoked before each retry (attempt number, exception).</param>
-    public static async Task RunWithRetryAsync(
+    public static Task RunWithRetryAsync(
         Func<Task> action,
+        int maxRetries,
+        TimeSpan baseDelay,
+        Func<Exception, bool> isTransient,
+        Action<int, Exception>? onRetry,
+        CancellationToken cancellationToken) =>
+        RunWithRetryAsync<object?>(
+            async () => { await action(); return null; },
+            maxRetries, baseDelay, isTransient, onRetry, cancellationToken);
+
+    /// <summary>Retry variant that returns the operation's result.</summary>
+    public static async Task<T> RunWithRetryAsync<T>(
+        Func<Task<T>> action,
         int maxRetries,
         TimeSpan baseDelay,
         Func<Exception, bool> isTransient,
@@ -21,8 +33,7 @@ public static class Resilience
         {
             try
             {
-                await action();
-                return;
+                return await action();
             }
             catch (Exception ex) when (attempt < maxRetries && isTransient(ex))
             {

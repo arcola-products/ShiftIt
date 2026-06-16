@@ -131,6 +131,29 @@ public sealed class ArchiveScannerTests
         Assert.True(File.Exists(Path.Combine(archive, "now.txt")));
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(8)]
+    public async Task RunSweep_MovesAllFiles_AtAnyParallelism(int parallelism)
+    {
+        using var hotDir = new TempDir();
+        using var archiveDir = new TempDir();
+        const int count = 25;
+        foreach (var i in Enumerable.Range(0, count))
+        {
+            Age(hotDir.WriteFile($"sub{i % 3}/file{i}.txt", $"data{i}"), 40);
+        }
+
+        var options = OptionsFor(hotDir.Path, archiveDir.Path);
+        options.MaxParallelMoves = parallelism;
+
+        await CreateScanner(options).RunSweepAsync(CancellationToken.None);
+
+        // Every file archived exactly once, none lost or duplicated.
+        Assert.Empty(Directory.GetFiles(hotDir.Path, "*", SearchOption.AllDirectories));
+        Assert.Equal(count, Directory.GetFiles(archiveDir.Path, "*", SearchOption.AllDirectories).Length);
+    }
+
     [Fact]
     public async Task RunSweep_StopsPair_WhenMoverAborts()
     {

@@ -54,6 +54,7 @@ All settings live under the `Archive` section of
     "VerifyWithHash": false,     // false = length check; true = also SHA-256
     "MaxRetries": 3,             // retries for transient errors (network blips, file locks)
     "RetryDelaySeconds": 2,      // base backoff; doubles each attempt (2s, 4s, 8s...)
+    "MaxParallelMoves": 1,       // concurrent moves per pair; raise for SMB/high-latency targets
     "LogDirectory": "logs",      // rolling file log location (relative to the app base dir)
     "LogRetentionDays": 14,      // delete daily log files older than this
     "Pairs": [
@@ -77,6 +78,7 @@ via `IOptionsMonitor`, so edits are picked up without a restart.
 | `VerifyWithHash` | Verify copies with SHA-256 in addition to byte length (slower — see Benchmarks). |
 | `MaxRetries` | Retries after a transient failure (sharing violation, momentary network drop) before giving up. |
 | `RetryDelaySeconds` | Base delay between retries; grows exponentially per attempt. |
+| `MaxParallelMoves` | Files moved concurrently within a pair (1 = sequential). Raise to hide per-file latency on SMB/network targets. |
 | `LogDirectory` | Folder for the detailed rolling file log. Relative paths resolve against the app base directory. |
 | `LogRetentionDays` | Daily log files older than this are deleted automatically. |
 | `Pairs[]` | One or more `{ Name, HotRoot, ArchiveRoot }` mappings. |
@@ -145,16 +147,20 @@ verified and durable, so nothing is ever lost to an interrupted or failed move.
 dotnet test
 ```
 
-41 xUnit tests in [`tests/ShiftIt.Tests`](tests/ShiftIt.Tests) cover the move
+48 xUnit tests in [`tests/ShiftIt.Tests`](tests/ShiftIt.Tests) cover the move
 logic (mirroring, conflict skip, hash verification, no temp leftovers), the
 scanner (age filtering, empty-folder pruning, missing hot root, `MinAge=0`,
-pair abort), error classification, the retry policy, and configuration
-validation. Bad-situation coverage includes a missing source, an exclusively
-locked source, and an unreachable archive drive.
+pair abort, parallelism), error classification, the retry policy, and
+configuration validation. Bad-situation coverage includes a missing source, an
+exclusively locked source, and an unreachable archive drive.
 
-The core move and scan tests run against **both a local destination and the SMB
-share** (`S:\The Archive\temp`); the SMB cases skip automatically when the share
-is offline. Tests use real directories and clean up after themselves.
+**End-to-end tests** drive the whole pipeline over a realistic multi-nested tree
+of mixed file sizes and assert exact structure mirroring and byte-for-byte
+content — sequential and parallel, with and without hashing.
+
+The move, scan, and end-to-end tests run against **both a local destination and
+the SMB share** (`S:\The Archive\temp`); the SMB cases skip automatically when
+the share is offline. Tests use real directories and clean up after themselves.
 
 ## Benchmarks
 
@@ -162,31 +168,54 @@ is offline. Tests use real directories and clean up after themselves.
 dotnet run -c Release --project benchmarks/ShiftIt.Benchmarks -- --filter '*'
 ```
 
-[BenchmarkDotNet](benchmarks/ShiftIt.Benchmarks) measures `FileMover.MoveAsync`
-across file sizes, with hash verification off/on, to **both a local disk and an
-SMB share** (`S:\The Archive\temp`). The source is always local, so the SMB rows
-measure a real local→network move. Mean times (Ryzen 7 3700X, .NET 10, gigabit
-SMB, warm OS cache):
+### Single move (`FileMoveBenchmarks`)
+
+Measures `FileMover.MoveAsync` across file sizes, with hash verification off/on,
+to **both a local disk and an SMB share** (`S:\The Archive\temp`). The source is
+always local, so the SMB rows measure a real local→network move. Mean times
+(Ryzen 7 3700X, .NET 10, gigabit SMB, warm OS cache):
 
 | File size | Local | Local + SHA-256 | SMB | SMB + SHA-256 |
 |---|--:|--:|--:|--:|
-| 4 KB | 1.6 ms | 3.9 ms | 12.7 ms | 17.7 ms |
-| 256 KB | 6.0 ms | 14.8 ms | 22.8 ms | 51.4 ms |
-| 4 MB | 5.3 ms | 19.1 ms | 59.8 ms | 124.9 ms |
-| 64 MB | 35.6 ms | 137.4 ms | 814 ms | 1,617 ms |
+| 4 KB | 1.6 ms | 3.3 ms | 8.0 ms | 12.6 ms |
+| 256 KB | 5.5 ms | 15.3 ms | 25 ms | 24.8 ms |
+| 4 MB | 4.7 ms | 20.4 ms | 74 ms | 159 ms |
+| 64 MB | 33.6 ms | 130 ms | 871 ms | 1,897 ms |
 
-Takeaways:
+- **SMB adds a large fixed latency** plus network-bound throughput. Size
+  `ScanIntervalMinutes` and expectations for a network archive accordingly.
+- **Hashing during the copy** means the source is read once, not twice; small and
+  mid-size hashed moves over SMB roughly halved versus the naive approach. Very
+  large hashed files over SMB are a touch slower (streamed write vs `File.Copy`),
+  and hashing is off by default regardless.
+- The non-hash path is allocation-free (~2–5 KB/move regardless of size).
+- SMB numbers carry real network jitter (wide error bars); treat them as
+  ballpark, not precise.
 
-- **SMB adds a large fixed latency** plus network-bound throughput — even a 4 KB
-  move is ~8× slower than local, and 64 MB is ~20×. Sizing `ScanIntervalMinutes`
-  and expectations for a network archive should account for this.
-- **Hashing re-reads the source and the copy**, so it roughly doubles to
-  quadruples the time and grows with size; over SMB the verifying read also
-  crosses the network. It is off by default for this reason.
-- The non-hash path is allocation-free (~2–5 KB/move regardless of size); the
-  hash path allocates a fixed ~2 MB for its read buffers.
+### Full-process workloads (`WorkloadBenchmarks`)
 
-Numbers are warm-cache; a cold disk or a busier network will be slower.
+Drives a whole `ArchiveScanner.RunSweepAsync` over realistic, multi-nested trees
+to a local and an SMB destination, sequential (`1`) vs parallel (`8`). Median
+sweep time (high run-to-run variance — see note):
+
+| Workload | Local ×1 | Local ×8 | SMB ×1 | SMB ×8 |
+|---|--:|--:|--:|--:|
+| **ManySmall** — 250 × 8 KB, nested | 358 ms | 153 ms | 2.70 s | 0.99 s |
+| **Mixed** — 100 files (~12 MB), nested | 239 ms | 61 ms | 1.43 s | 0.55 s |
+| **FewLarge** — 3 × 20 MB | 41 ms | 23 ms | 0.85 s | 0.87 s |
+
+Throughput and takeaways:
+
+- **Small-file workloads are latency-bound**, so parallelism is the big lever:
+  over SMB, ManySmall goes from ~95 to ~250 files/s (×8) and Mixed from ~70 to
+  ~180 files/s. Locally, 2–4×.
+- **Large-file workloads are bandwidth-bound**: FewLarge over SMB saturates the
+  link (~70 MB/s) and parallelism doesn't help — extra concurrency just shares
+  the same pipe (and there are only 3 files to spread).
+- So tune `MaxParallelMoves` to the data: raise it for many-small-file trees on a
+  network target; leave it low when big files dominate.
+- Numbers are warm-cache with real network/GC jitter; medians are shown because
+  the per-iteration spread is wide. Treat them as relative, not precise.
 
 ## Project layout
 

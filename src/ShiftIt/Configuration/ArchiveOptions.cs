@@ -44,6 +44,14 @@ public sealed class ArchiveOptions
     public double RetryDelaySeconds { get; set; } = 2;
 
     /// <summary>
+    /// How many files to move concurrently within a pair. 1 is sequential.
+    /// Higher values hide per-file latency on high-latency targets such as SMB
+    /// shares, at the cost of more simultaneous I/O.
+    /// </summary>
+    [Range(1, 256)]
+    public int MaxParallelMoves { get; set; } = 1;
+
+    /// <summary>
     /// Directory for the detailed rolling file log. Relative paths are resolved
     /// against the application's base directory. A daily log file is written here.
     /// </summary>
