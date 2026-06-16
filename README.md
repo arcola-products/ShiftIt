@@ -20,6 +20,12 @@ On a schedule, for each configured **hot → archive** pair the service:
 3. Moves the file safely (see below).
 4. Optionally removes folders left empty in the hot tree (never the hot root).
 
+The scan **does not follow directory junctions or symlinks** (a sweep can never
+escape the hot tree, loop, or delete from a link's target) and **skips hidden
+and system files** (`Thumbs.db`, `desktop.ini`, …); unreadable folders are
+skipped rather than failing the sweep. Note that `.lnk` shortcut *files* are
+ordinary files and are archived like any other.
+
 ### Safe move (crash- and cross-volume-proof)
 
 Each file is moved with a copy → verify → rename → delete sequence:
@@ -34,6 +40,10 @@ Because the source is removed last, an interrupted run leaves the original
 intact and is safe to re-run. If a file already exists at the destination, the
 move is **skipped with a warning** and the source is left untouched (the service
 never overwrites an existing archived file).
+
+Original **created and last-modified dates are preserved** on both the archived
+files and the mirrored folders (folder dates are captured before the files move
+out, then applied to the archive folders).
 
 ## Requirements
 
@@ -59,8 +69,13 @@ All settings live under the `Archive` section of
     "LogDirectory": "logs",      // rolling file log location (relative to the app base dir)
     "LogRetentionDays": 14,      // delete daily log files older than this
     "Pairs": [
-      { "Name": "Reports", "HotRoot": "D:\\Hot\\Reports", "ArchiveRoot": "E:\\Archive\\Reports" },
-      { "Name": "Logs",    "HotRoot": "D:\\Hot\\Logs",    "ArchiveRoot": "\\\\nas\\archive\\Logs" }
+      {
+        "Name": "Reports",
+        "HotRoot": "D:\\Hot\\Reports",
+        "ArchiveRoot": "E:\\Archive\\Reports",
+        "ExcludedFolders": [ "in-progress", "2024\\drafts" ]
+      },
+      { "Name": "Logs", "HotRoot": "D:\\Hot\\Logs", "ArchiveRoot": "\\\\nas\\archive\\Logs" }
     ]
   }
 }
@@ -83,7 +98,8 @@ via `IOptionsMonitor`, so edits are picked up without a restart.
 | `MaxParallelMoves` | Files moved concurrently within a pair (1 = sequential). Raise to hide per-file latency on SMB/network targets. |
 | `LogDirectory` | Folder for the detailed rolling file log. Relative paths resolve against the app base directory. |
 | `LogRetentionDays` | Daily log files older than this are deleted automatically. |
-| `Pairs[]` | One or more `{ Name, HotRoot, ArchiveRoot }` mappings. |
+| `Pairs[]` | One or more `{ Name, HotRoot, ArchiveRoot, ExcludedFolders? }` mappings. |
+| `Pairs[].ExcludedFolders` | Folders to skip in that hot root. A bare name (`node_modules`) matches that folder at any depth; a relative path (`2024/drafts`) excludes one subtree. Case-insensitive; excluded trees aren't descended into. |
 
 ## Running
 

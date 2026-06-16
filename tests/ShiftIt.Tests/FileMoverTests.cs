@@ -40,8 +40,10 @@ public sealed class FileMoverTests
         Assert.Equal("hello", File.ReadAllText(destination));
     }
 
-    [Fact]
-    public async Task MoveAsync_PreservesLastWriteTime()
+    [Theory]
+    [InlineData(false)] // File.Copy path
+    [InlineData(true)]  // streamed hash path
+    public async Task MoveAsync_PreservesLastWriteTime(bool verifyWithHash)
     {
         using var temp = new TempDir();
         var source = temp.WriteFile("hot/file.txt");
@@ -49,7 +51,7 @@ public sealed class FileMoverTests
         File.SetLastWriteTimeUtc(source, stamp);
         var destination = EnsureDest(temp.Combine("archive", "file.txt"));
 
-        await CreateMover().MoveAsync(source, destination, CancellationToken.None);
+        await CreateMover(verifyWithHash).MoveAsync(source, destination, CancellationToken.None);
 
         Assert.Equal(stamp, File.GetLastWriteTimeUtc(destination), TimeSpan.FromSeconds(2));
     }

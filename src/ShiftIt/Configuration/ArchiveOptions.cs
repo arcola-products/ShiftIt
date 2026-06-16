@@ -94,4 +94,12 @@ public sealed class TargetPair
     /// <summary>Destination root that receives aged files.</summary>
     [Required]
     public string ArchiveRoot { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Folders to skip within this hot root. A bare name (e.g. "node_modules")
+    /// matches any folder with that name at any depth; a relative path (e.g.
+    /// "2024/in-progress") excludes that one subtree. Matching is case-insensitive
+    /// and excluded folders are not descended into.
+    /// </summary>
+    public List<string> ExcludedFolders { get; set; } = new();
 }

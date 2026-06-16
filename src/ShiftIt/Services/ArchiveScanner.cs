@@ -22,6 +22,18 @@ namespace ShiftIt.Services;
 /// </summary>
 public sealed class ArchiveScanner : IArchiveScanner
 {
+    // Per-directory listing. Skips reparse points (junctions/symlinks) so a sweep
+    // can never follow a link out of the hot tree, loop, or delete from a link's
+    // target; skips hidden and system files (Thumbs.db, desktop.ini, ...); and
+    // tolerates entries it cannot read. Recursion is manual so excluded folders
+    // can be pruned without descending into them.
+    private static readonly EnumerationOptions DirectoryEnumeration = new()
+    {
+        RecurseSubdirectories = false,
+        AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System,
+        IgnoreInaccessible = true,
+    };
+
     private readonly IFileMover _mover;
     private readonly IOptionsMonitor<ArchiveOptions> _options;
     private readonly ILogger<ArchiveScanner> _logger;
@@ -67,12 +79,15 @@ public sealed class ArchiveScanner : IArchiveScanner
         var stats = new SweepStats();
         var ensuredDirs = new ConcurrentDictionary<string, Lazy<Task>>(StringComparer.OrdinalIgnoreCase);
         var emptiedDirs = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+        // Source folder dates captured before files move out, keyed by source dir.
+        var sourceDirTimes = new ConcurrentDictionary<string, (DateTime Creation, DateTime LastWrite)>(
+            StringComparer.OrdinalIgnoreCase);
         string? abortReason = null;
 
-        // LastWriteTimeUtc comes from the enumeration data — no per-file stat.
-        // Skip leftover temp files from a previous interrupted run.
-        var eligible = new DirectoryInfo(hotRoot)
-            .EnumerateFiles("*", SearchOption.AllDirectories)
+        // Walk the tree, pruning excluded folders; LastWriteTimeUtc comes from the
+        // enumeration (no per-file stat). Skip leftover temp files too.
+        var exclusions = new ExclusionMatcher(pair.ExcludedFolders);
+        var eligible = EnumerateFiles(new DirectoryInfo(hotRoot), hotRoot, exclusions, sourceDirTimes)
             .Where(f => !f.Name.EndsWith(".archtmp", StringComparison.OrdinalIgnoreCase)
                         && f.LastWriteTimeUtc <= cutoffUtc);
 
@@ -127,6 +142,9 @@ public sealed class ArchiveScanner : IArchiveScanner
             abortReason = ex.InnerExceptions.OfType<PairAbortedException>().First().Message;
         }
 
+        // Mirror each source folder's original dates onto the archive folders.
+        ApplyFolderTimestamps(ensuredDirs.Keys, archiveRoot, hotRoot, sourceDirTimes);
+
         if (options.RemoveEmptyHotFolders)
         {
             PruneEmptyDirectories(emptiedDirs.Keys, hotRoot);
@@ -169,6 +187,96 @@ public sealed class ArchiveScanner : IArchiveScanner
                 _ => "could not create the archive directory",
             };
             throw new PairAbortedException(reason, ex);
+        }
+    }
+
+    /// <summary>
+    /// Recursively yields files under <paramref name="dir"/>, pruning excluded
+    /// folders, reparse points, and hidden/system entries, and skipping folders
+    /// that can't be read rather than failing the sweep.
+    /// </summary>
+    private IEnumerable<FileInfo> EnumerateFiles(
+        DirectoryInfo dir,
+        string hotRoot,
+        ExclusionMatcher exclusions,
+        ConcurrentDictionary<string, (DateTime Creation, DateTime LastWrite)> sourceDirTimes)
+    {
+        FileInfo[]? files = null;
+        DirectoryInfo[]? subdirs = null;
+        try
+        {
+            files = dir.GetFiles("*", DirectoryEnumeration);
+            subdirs = dir.GetDirectories("*", DirectoryEnumeration);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Skipping unreadable folder {Folder}.", dir.FullName);
+        }
+
+        if (files is null || subdirs is null)
+        {
+            yield break;
+        }
+
+        // Snapshot this folder's dates now — before any of its files move out and
+        // change its last-write time — so they can be mirrored to the archive.
+        sourceDirTimes.TryAdd(dir.FullName, (dir.CreationTimeUtc, dir.LastWriteTimeUtc));
+
+        foreach (var file in files)
+        {
+            yield return file;
+        }
+
+        foreach (var sub in subdirs)
+        {
+            if (exclusions.IsExcluded(sub.FullName, hotRoot))
+            {
+                _logger.LogDebug("Excluding folder {Folder}.", sub.FullName);
+                continue;
+            }
+
+            foreach (var file in EnumerateFiles(sub, hotRoot, exclusions, sourceDirTimes))
+            {
+                yield return file;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Stamps each created archive folder (and its parents up to the archive root)
+    /// with the original dates captured from the matching source folder.
+    /// </summary>
+    private void ApplyFolderTimestamps(
+        IEnumerable<string> archiveDirs,
+        string archiveRoot,
+        string hotRoot,
+        IReadOnlyDictionary<string, (DateTime Creation, DateTime LastWrite)> sourceDirTimes)
+    {
+        var stamped = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var start in archiveDirs)
+        {
+            var dir = start;
+            while (!string.Equals(dir, archiveRoot, StringComparison.OrdinalIgnoreCase)
+                   && dir.StartsWith(archiveRoot, StringComparison.OrdinalIgnoreCase)
+                   && stamped.Add(dir))
+            {
+                var relativePath = Path.GetRelativePath(archiveRoot, dir);
+                var sourceDir = Path.Combine(hotRoot, relativePath);
+                if (sourceDirTimes.TryGetValue(sourceDir, out var times) && Directory.Exists(dir))
+                {
+                    try
+                    {
+                        Directory.SetCreationTimeUtc(dir, times.Creation);
+                        Directory.SetLastWriteTimeUtc(dir, times.LastWrite);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Could not set dates on archive folder {Folder}.", dir);
+                    }
+                }
+
+                dir = Path.GetDirectoryName(dir)!;
+            }
         }
     }
 
@@ -225,6 +333,48 @@ public sealed class ArchiveScanner : IArchiveScanner
                     break;
                 }
             }
+        }
+    }
+
+    /// <summary>Matches folders to skip, by bare name (anywhere) or relative path.</summary>
+    private sealed class ExclusionMatcher
+    {
+        private readonly HashSet<string> _names = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _relativePaths = new(StringComparer.OrdinalIgnoreCase);
+
+        public ExclusionMatcher(IEnumerable<string>? excluded)
+        {
+            foreach (var entry in excluded ?? [])
+            {
+                var normalized = entry.Trim()
+                    .Replace('/', Path.DirectorySeparatorChar)
+                    .Replace('\\', Path.DirectorySeparatorChar)
+                    .Trim(Path.DirectorySeparatorChar);
+                if (normalized.Length == 0)
+                {
+                    continue;
+                }
+
+                if (normalized.Contains(Path.DirectorySeparatorChar))
+                {
+                    _relativePaths.Add(normalized);
+                }
+                else
+                {
+                    _names.Add(normalized);
+                }
+            }
+        }
+
+        public bool IsExcluded(string directoryFullPath, string hotRoot)
+        {
+            if (_names.Contains(Path.GetFileName(directoryFullPath)))
+            {
+                return true;
+            }
+
+            return _relativePaths.Count > 0
+                && _relativePaths.Contains(Path.GetRelativePath(hotRoot, directoryFullPath));
         }
     }
 

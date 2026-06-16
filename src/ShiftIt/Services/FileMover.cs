@@ -60,7 +60,11 @@ public sealed class FileMover : IFileMover
                 return MoveResult.Failed;
             }
 
-            // 3. Preserve creation time (File.Copy already preserves last-write).
+            // 3. Preserve the original timestamps on the archived copy. This is
+            // set explicitly (not relied on from File.Copy) because the hash
+            // path streams the copy, and some targets (e.g. SMB) don't carry the
+            // last-write time across on their own.
+            File.SetLastWriteTimeUtc(tempPath, File.GetLastWriteTimeUtc(sourcePath));
             File.SetCreationTimeUtc(tempPath, File.GetCreationTimeUtc(sourcePath));
 
             // 4. Atomic rename into place (same volume).

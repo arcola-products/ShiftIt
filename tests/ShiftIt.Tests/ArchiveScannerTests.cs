@@ -132,6 +132,110 @@ public sealed class ArchiveScannerTests
     }
 
     [Fact]
+    public async Task RunSweep_PreservesFolderDates()
+    {
+        using var hotDir = new TempDir();
+        using var archiveDir = new TempDir();
+        Age(hotDir.WriteFile("2023/q1/old.txt"), 40);
+
+        // Back-date the source folders (after the file write, which touched them).
+        var folderStamp = DateTime.UtcNow.AddDays(-150);
+        Directory.SetLastWriteTimeUtc(Path.Combine(hotDir.Path, "2023", "q1"), folderStamp);
+        Directory.SetLastWriteTimeUtc(Path.Combine(hotDir.Path, "2023"), folderStamp);
+
+        // Keep source folders so the comparison is unambiguous.
+        await CreateScanner(OptionsFor(hotDir.Path, archiveDir.Path, removeEmpty: false))
+            .RunSweepAsync(CancellationToken.None);
+
+        var archiveQ1 = Path.Combine(archiveDir.Path, "2023", "q1");
+        var archive2023 = Path.Combine(archiveDir.Path, "2023");
+        Assert.Equal(folderStamp, Directory.GetLastWriteTimeUtc(archiveQ1), TimeSpan.FromSeconds(2));
+        Assert.Equal(folderStamp, Directory.GetLastWriteTimeUtc(archive2023), TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task RunSweep_ExcludesFoldersByName()
+    {
+        using var hotDir = new TempDir();
+        using var archiveDir = new TempDir();
+        var kept = hotDir.WriteFile("pkg/node_modules/lib.js");
+        Age(kept, 40);
+        var moved = hotDir.WriteFile("src/app.js");
+        Age(moved, 40);
+
+        var options = OptionsFor(hotDir.Path, archiveDir.Path);
+        options.Pairs[0].ExcludedFolders = ["node_modules"];
+
+        await CreateScanner(options).RunSweepAsync(CancellationToken.None);
+
+        Assert.True(File.Exists(kept));    // excluded folder untouched (any depth)
+        Assert.False(File.Exists(moved));  // other file archived
+        Assert.True(File.Exists(Path.Combine(archiveDir.Path, "src", "app.js")));
+    }
+
+    [Fact]
+    public async Task RunSweep_ExcludesSubtreeByRelativePath()
+    {
+        using var hotDir = new TempDir();
+        using var archiveDir = new TempDir();
+        var kept = hotDir.WriteFile("2024/in-progress/draft.txt");
+        Age(kept, 40);
+        var moved = hotDir.WriteFile("2024/final/report.txt");
+        Age(moved, 40);
+
+        var options = OptionsFor(hotDir.Path, archiveDir.Path);
+        options.Pairs[0].ExcludedFolders = ["2024/in-progress"];
+
+        await CreateScanner(options).RunSweepAsync(CancellationToken.None);
+
+        Assert.True(File.Exists(kept));    // only this subtree excluded
+        Assert.False(File.Exists(moved));
+        Assert.True(File.Exists(Path.Combine(archiveDir.Path, "2024", "final", "report.txt")));
+    }
+
+    [Fact]
+    public async Task RunSweep_SkipsHiddenAndSystemFiles()
+    {
+        using var hotDir = new TempDir();
+        using var archiveDir = new TempDir();
+        var hidden = hotDir.WriteFile("Thumbs.db", "x");
+        Age(hidden, 40);
+        File.SetAttributes(hidden, File.GetAttributes(hidden) | FileAttributes.Hidden);
+        var normal = hotDir.WriteFile("photo.jpg", "x");
+        Age(normal, 40);
+
+        await CreateScanner(OptionsFor(hotDir.Path, archiveDir.Path)).RunSweepAsync(CancellationToken.None);
+
+        Assert.True(File.Exists(hidden));   // hidden file left in place
+        Assert.False(File.Exists(normal));  // normal file archived
+        Assert.Single(Directory.GetFiles(archiveDir.Path, "*", SearchOption.AllDirectories));
+    }
+
+    [SkippableFact]
+    public async Task RunSweep_DoesNotFollowDirectorySymlinks()
+    {
+        using var hotDir = new TempDir();
+        using var archiveDir = new TempDir();
+        using var outside = new TempDir();
+        var target = outside.WriteFile("secret.txt", "x");
+        Age(target, 40);
+
+        try
+        {
+            Directory.CreateSymbolicLink(Path.Combine(hotDir.Path, "link"), outside.Path);
+        }
+        catch (Exception ex)
+        {
+            Skip.If(true, $"Cannot create a directory symlink (needs privilege): {ex.Message}");
+        }
+
+        await CreateScanner(OptionsFor(hotDir.Path, archiveDir.Path)).RunSweepAsync(CancellationToken.None);
+
+        Assert.True(File.Exists(target)); // link not followed → target untouched
+        Assert.Empty(Directory.GetFiles(archiveDir.Path, "*", SearchOption.AllDirectories));
+    }
+
+    [Fact]
     public async Task RunSweep_CopyOnly_CopiesButKeepsSource_AndIsIdempotent()
     {
         using var hotDir = new TempDir();
