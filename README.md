@@ -1,7 +1,7 @@
 # Shift-It
 
 A .NET 10 Worker Service that keeps **hot** storage clean by relocating aged
-files into a parallel **archive** location — recreating the source folder
+files into a parallel **archive** location,  recreating the source folder
 structure under the archive root as it goes. Archive reffers to alternate
 storage location not any kind of compressed/packed "folder".
 
@@ -92,7 +92,7 @@ via `IOptionsMonitor`, so edits are picked up without a restart.
 | `MinAgeDays` | Minimum file age (by `LastWriteTimeUtc`) to be archived. `0` archives everything present. |
 | `RemoveEmptyHotFolders` | Prune folders emptied by a sweep (hot roots are never removed). |
 | `CopyOnly` | Safe/test mode: copy and verify into the archive but never delete the source. Re-runs skip files already present, so it's idempotent. |
-| `VerifyWithHash` | Verify copies with SHA-256 in addition to byte length (slower — see Benchmarks). |
+| `VerifyWithHash` | Verify copies with SHA-256 in addition to byte length (slower  see Benchmarks). |
 | `MaxRetries` | Retries after a transient failure (sharing violation, momentary network drop) before giving up. |
 | `RetryDelaySeconds` | Base delay between retries; grows exponentially per attempt. |
 | `MaxParallelMoves` | Files moved concurrently within a pair (1 = sequential). Raise to hide per-file latency on SMB/network targets. |
@@ -128,11 +128,11 @@ Remove with `sc.exe delete ShiftIt`.
 
 Two destinations, deliberately scoped so each stays useful:
 
-- **Windows Event Log** (when running as a service) — high-signal only: service
+- **Windows Event Log** (when running as a service)  high-signal only: service
   start/stop, one summary line per pair per sweep, and warnings/errors such as a
   missing hot root, an aborted pair, or a sweep that finished with failures.
   Per-file activity is **never** written here, so the Event Log stays readable.
-- **Rolling file log** (`LogDirectory`, daily file `shiftit-YYYYMMDD.log`) —
+- **Rolling file log** (`LogDirectory`, daily file `shiftit-YYYYMMDD.log`) 
   detailed: every move, skip, retry, and empty-folder cleanup at `Debug`, plus
   everything the Event Log gets. Files older than `LogRetentionDays` are pruned
   automatically (powered by [Serilog](https://serilog.net/)).
@@ -145,15 +145,15 @@ log; the Event Log is left untouched.
 The mover is built to survive an imperfect environment without losing data or
 flooding the logs:
 
-- **Transient errors** — a sharing violation, a file briefly locked, or a
+- **Transient errors**  a sharing violation, a file briefly locked, or a
   momentary network drop is retried up to `MaxRetries` times with exponential
   backoff (`RetryDelaySeconds`, doubling each attempt).
-- **Destination full** — the affected pair is stopped for the sweep with a
+- **Destination full**  the affected pair is stopped for the sweep with a
   single clear warning rather than failing every remaining file; other pairs
   continue. It resumes next sweep once space is available.
-- **Source/destination becomes inaccessible** — retried; if still unreachable
+- **Source/destination becomes inaccessible**  retried; if still unreachable
   after the retries, the pair is aborted (one warning) instead of churning.
-- **Insufficient permissions** — that single file is skipped and logged; the
+- **Insufficient permissions**  that single file is skipped and logged; the
   sweep moves on.
 
 In every case the source file is only deleted after the archived copy is
@@ -174,7 +174,7 @@ exclusively locked source, and an unreachable archive drive.
 
 **End-to-end tests** drive the whole pipeline over a realistic multi-nested tree
 of mixed file sizes and assert exact structure mirroring and byte-for-byte
-content — sequential and parallel, with and without hashing.
+content  sequential and parallel, with and without hashing.
 
 The move, scan, and end-to-end tests run against **both a local destination and
 the SMB share** (`S:\The Archive\temp`); the SMB cases skip automatically when
@@ -206,7 +206,7 @@ always local, so the SMB rows measure a real local→network move. Mean times
   mid-size hashed moves over SMB roughly halved versus the naive approach. Very
   large hashed files over SMB are a touch slower (streamed write vs `File.Copy`),
   and hashing is off by default regardless.
-- The non-hash path is allocation-free (~2–5 KB/move regardless of size).
+- The non-hash path is allocation-free (~2-5 KB/move regardless of size).
 - SMB numbers carry real network jitter (wide error bars); treat them as
   ballpark, not precise.
 
@@ -214,21 +214,21 @@ always local, so the SMB rows measure a real local→network move. Mean times
 
 Drives a whole `ArchiveScanner.RunSweepAsync` over realistic, multi-nested trees
 to a local and an SMB destination, sequential (`1`) vs parallel (`8`). Median
-sweep time (high run-to-run variance — see note):
+sweep time (high run-to-run variance  see note):
 
 | Workload | Local ×1 | Local ×8 | SMB ×1 | SMB ×8 |
 |---|--:|--:|--:|--:|
-| **ManySmall** — 250 × 8 KB, nested | 358 ms | 153 ms | 2.70 s | 0.99 s |
-| **Mixed** — 100 files (~12 MB), nested | 239 ms | 61 ms | 1.43 s | 0.55 s |
-| **FewLarge** — 3 × 20 MB | 41 ms | 23 ms | 0.85 s | 0.87 s |
+| **ManySmall**  250 × 8 KB, nested | 358 ms | 153 ms | 2.70 s | 0.99 s |
+| **Mixed**  100 files (~12 MB), nested | 239 ms | 61 ms | 1.43 s | 0.55 s |
+| **FewLarge**  3 × 20 MB | 41 ms | 23 ms | 0.85 s | 0.87 s |
 
 Throughput and takeaways:
 
 - **Small-file workloads are latency-bound**, so parallelism is the big lever:
   over SMB, ManySmall goes from ~95 to ~250 files/s (×8) and Mixed from ~70 to
-  ~180 files/s. Locally, 2–4×.
+  ~180 files/s. Locally, 2-4×.
 - **Large-file workloads are bandwidth-bound**: FewLarge over SMB saturates the
-  link (~70 MB/s) and parallelism doesn't help — extra concurrency just shares
+  link (~70 MB/s) and parallelism doesn't help  extra concurrency just shares
   the same pipe (and there are only 3 files to spread).
 - So tune `MaxParallelMoves` to the data: raise it for many-small-file trees on a
   network target; leave it low when big files dominate.
