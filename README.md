@@ -103,6 +103,15 @@ via `IOptionsMonitor`, so edits are picked up without a restart.
 
 ## Running
 
+### Download a release (no SDK needed)
+
+Grab the latest self-contained Windows build from the
+[**Releases**](https://github.com/arcola-products/ShiftIt/releases/latest) page
+(`ShiftIt-vX.Y.Z-win-x64.zip`). It bundles the .NET runtime, so nothing needs to
+be installed. Extract it, edit `appsettings.json`, then either run `ShiftIt.exe`
+directly or register it as a service (see below, pointing at the extracted
+folder instead of publishing).
+
 ### Development (console)
 
 ```bash
@@ -123,6 +132,9 @@ Start-Service ShiftIt
 
 The host detects the service context automatically (`AddWindowsService`).
 Remove with `sc.exe delete ShiftIt`.
+
+> Using a downloaded release zip instead? Skip the `dotnet publish` step and
+> point `-BinaryPathName` at the `ShiftIt.exe` inside the extracted folder.
 
 ## Logging
 
