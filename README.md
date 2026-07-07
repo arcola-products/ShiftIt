@@ -259,3 +259,7 @@ ShiftIt.sln
 ├── tests/ShiftIt.Tests/         xUnit tests
 └── benchmarks/ShiftIt.Benchmarks/  BenchmarkDotNet suite
 ```
+
+## License
+
+Released under the [MIT License](LICENSE).
