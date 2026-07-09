@@ -60,6 +60,17 @@ public sealed class ArchiveOptions
     public int MaxParallelMoves { get; set; } = 1;
 
     /// <summary>
+    /// How many times a single file may fail to archive, across sweeps, before it
+    /// is quarantined: skipped on later sweeps so it is neither retried nor
+    /// re-logged until it changes or the service restarts. This stops a set of
+    /// permanently failing files (e.g. permission-denied) from being reprocessed
+    /// and re-logged on every sweep, which would otherwise grow the logs without
+    /// bound. Failure state is held in memory. 0 disables quarantine.
+    /// </summary>
+    [Range(0, 1000)]
+    public int MaxFileFailures { get; set; } = 3;
+
+    /// <summary>
     /// Directory for the detailed rolling file log. Relative paths are resolved
     /// against the application's base directory. A daily log file is written here.
     /// </summary>
@@ -71,6 +82,33 @@ public sealed class ArchiveOptions
     /// </summary>
     [Range(1, 3650)]
     public int LogRetentionDays { get; set; } = 14;
+
+    /// <summary>
+    /// Maximum size of a single rolling log file, in megabytes. When a file
+    /// reaches this size it rolls to a new one within the day. Together with
+    /// <see cref="LogFileCountLimit"/> this hard-caps how much disk the file logs
+    /// can consume, even during an error storm.
+    /// </summary>
+    [Range(1, 10240)]
+    public int LogFileSizeLimitMB { get; set; } = 50;
+
+    /// <summary>
+    /// Maximum number of rolling log files to retain. Total log disk use is
+    /// bounded by roughly this multiplied by <see cref="LogFileSizeLimitMB"/>.
+    /// Whichever of this or <see cref="LogRetentionDays"/> removes a file first wins.
+    /// </summary>
+    [Range(1, 10000)]
+    public int LogFileCountLimit { get; set; } = 30;
+
+    /// <summary>
+    /// Maximum size, in kilobytes, of the dedicated "ShiftIt" Windows Event Log.
+    /// Once full, the oldest entries are overwritten automatically, so the log
+    /// can never grow past this and fill the server disk. Rounded down to the
+    /// nearest 64 KB (the increment Windows requires). Has no effect off
+    /// Windows or when not running as the Windows Service.
+    /// </summary>
+    [Range(64, 4_194_240)]
+    public int EventLogMaxKilobytes { get; set; } = 1024;
 
     /// <summary>The hot-to-archive root mappings to process each sweep.</summary>
     [Required, MinLength(1)]

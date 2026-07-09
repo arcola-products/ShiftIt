@@ -193,9 +193,12 @@ public sealed class ArchiveScannerTests
         Assert.True(File.Exists(Path.Combine(archiveDir.Path, "2024", "final", "report.txt")));
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task RunSweep_SkipsHiddenAndSystemFiles()
     {
+        Skip.IfNot(OperatingSystem.IsWindows(),
+            "Hidden/system file attributes are Windows-specific (SetAttributes is a no-op elsewhere).");
+
         using var hotDir = new TempDir();
         using var archiveDir = new TempDir();
         var hidden = hotDir.WriteFile("Thumbs.db", "x");
@@ -308,6 +311,9 @@ public sealed class ArchiveScannerTests
     [SkippableFact]
     public async Task RunSweep_AbortsPair_AndKeepsSources_WhenArchiveDriveMissing()
     {
+        Skip.IfNot(OperatingSystem.IsWindows(),
+            "Simulates a missing volume via an unused drive letter, which is Windows-specific.");
+
         var missingDrive = FirstUnusedDriveRoot();
         Skip.If(missingDrive is null, "No unused drive letter available to simulate a missing volume.");
 
@@ -338,6 +344,52 @@ public sealed class ArchiveScannerTests
         return null;
     }
 
+    [Fact]
+    public async Task RunSweep_QuarantinesFailingFile_AndStopsRetryingIt()
+    {
+        using var temp = new TempDir();
+        var hot = temp.Combine("hot");
+        var archive = temp.Combine("archive");
+        var bad = temp.WriteFile("hot/bad.txt");
+        Age(bad, 40);
+
+        var options = OptionsFor(hot, archive);
+        options.MaxFileFailures = 2;
+        var mover = new FailingFileMover();
+        // One scanner instance keeps its failure tracker across sweeps.
+        var scanner = CreateScanner(options, mover);
+
+        // Sweeps 1 and 2 attempt the file; by sweep 3 it is quarantined and skipped.
+        for (var i = 0; i < 3; i++)
+        {
+            await scanner.RunSweepAsync(CancellationToken.None);
+        }
+
+        Assert.Equal(2, mover.Calls);   // attempted MaxFileFailures times, then no more
+        Assert.True(File.Exists(bad));  // source left untouched
+    }
+
+    [Fact]
+    public async Task RunSweep_RetriesFailingFileEverySweep_WhenQuarantineDisabled()
+    {
+        using var temp = new TempDir();
+        var hot = temp.Combine("hot");
+        var archive = temp.Combine("archive");
+        Age(temp.WriteFile("hot/bad.txt"), 40);
+
+        var options = OptionsFor(hot, archive);
+        options.MaxFileFailures = 0; // disabled
+        var mover = new FailingFileMover();
+        var scanner = CreateScanner(options, mover);
+
+        for (var i = 0; i < 3; i++)
+        {
+            await scanner.RunSweepAsync(CancellationToken.None);
+        }
+
+        Assert.Equal(3, mover.Calls); // retried on every sweep
+    }
+
     /// <summary>Throws <see cref="PairAbortedException"/> on the Nth call.</summary>
     private sealed class AbortingFileMover(int abortOnCall) : IFileMover
     {
@@ -351,6 +403,18 @@ public sealed class ArchiveScannerTests
                 throw new PairAbortedException("destination volume is full");
             }
             return Task.FromResult(MoveResult.Moved);
+        }
+    }
+
+    /// <summary>Always reports a per-file failure, counting how often it is called.</summary>
+    private sealed class FailingFileMover : IFileMover
+    {
+        public int Calls { get; private set; }
+
+        public Task<MoveResult> MoveAsync(string sourcePath, string destinationPath, CancellationToken ct)
+        {
+            Calls++;
+            return Task.FromResult(MoveResult.Failed);
         }
     }
 }

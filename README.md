@@ -66,8 +66,12 @@ All settings live under the `Archive` section of
     "MaxRetries": 3,             // retries for transient errors (network blips, file locks)
     "RetryDelaySeconds": 2,      // base backoff; doubles each attempt (2s, 4s, 8s...)
     "MaxParallelMoves": 1,       // concurrent moves per pair; raise for SMB/high-latency targets
+    "MaxFileFailures": 3,        // quarantine a file after this many failed sweeps; 0 = never
     "LogDirectory": "logs",      // rolling file log location (relative to the app base dir)
     "LogRetentionDays": 14,      // delete daily log files older than this
+    "LogFileSizeLimitMB": 50,    // roll to a new log file at this size
+    "LogFileCountLimit": 30,     // keep at most this many log files (hard disk cap)
+    "EventLogMaxKilobytes": 1024, // max size of the dedicated ShiftIt Event Log channel
     "Pairs": [
       {
         "Name": "Reports",
@@ -96,8 +100,12 @@ via `IOptionsMonitor`, so edits are picked up without a restart.
 | `MaxRetries` | Retries after a transient failure (sharing violation, momentary network drop) before giving up. |
 | `RetryDelaySeconds` | Base delay between retries; grows exponentially per attempt. |
 | `MaxParallelMoves` | Files moved concurrently within a pair (1 = sequential). Raise to hide per-file latency on SMB/network targets. |
+| `MaxFileFailures` | Consecutive sweeps a file may fail before it is quarantined (skipped, not retried or re-logged, until it changes or the service restarts). `0` disables quarantine. Tracked in memory. |
 | `LogDirectory` | Folder for the detailed rolling file log. Relative paths resolve against the app base directory. |
 | `LogRetentionDays` | Daily log files older than this are deleted automatically. |
+| `LogFileSizeLimitMB` | A log file rolls to a new one once it reaches this size. |
+| `LogFileCountLimit` | Maximum rolling log files kept. With `LogFileSizeLimitMB` this hard-caps total log disk use to roughly the two multiplied. |
+| `EventLogMaxKilobytes` | Max size of ShiftIt's dedicated Windows Event Log channel; oldest entries are overwritten. Windows service only. |
 | `Pairs[]` | One or more `{ Name, HotRoot, ArchiveRoot, ExcludedFolders? }` mappings. |
 | `Pairs[].ExcludedFolders` | Folders to skip in that hot root. A bare name (`node_modules`) matches that folder at any depth; a relative path (`2024/drafts`) excludes one subtree. Case-insensitive; excluded trees aren't descended into. |
 
@@ -144,13 +152,26 @@ Two destinations, deliberately scoped so each stays useful:
   start/stop, one summary line per pair per sweep, and warnings/errors such as a
   missing hot root, an aborted pair, or a sweep that finished with failures.
   Per-file activity is **never** written here, so the Event Log stays readable.
+  ShiftIt uses its own dedicated `ShiftIt` log channel, capped at
+  `EventLogMaxKilobytes` (default 1 MB, oldest entries overwritten), so it can
+  never grow to fill the disk.
 - **Rolling file log** (`LogDirectory`, daily file `shiftit-YYYYMMDD.log`) 
   detailed: every move, skip, retry, and empty-folder cleanup at `Debug`, plus
   everything the Event Log gets. Files older than `LogRetentionDays` are pruned
-  automatically (powered by [Serilog](https://serilog.net/)).
+  automatically (powered by [Serilog](https://serilog.net/)). Each file also
+  rolls at `LogFileSizeLimitMB` and at most `LogFileCountLimit` files are kept,
+  so total log disk use is hard-capped even during an error storm.
 
 When run as a console app (development), output goes to the console and the file
 log; the Event Log is left untouched.
+
+To keep the logs from growing without bound when the same files fail repeatedly,
+a file that fails to archive on `MaxFileFailures` consecutive sweeps is
+**quarantined**: skipped on later sweeps  neither retried nor re-logged  until
+it changes or the service restarts. Without this, a stuck set of files (for
+example a folder that can't be read) would be reprocessed and re-logged on every
+sweep forever. Failure tracking is in memory; a restart re-attempts each file
+once more, then quarantines it again.
 
 ## Resilience
 
@@ -177,10 +198,11 @@ verified and durable, so nothing is ever lost to an interrupted or failed move.
 dotnet test
 ```
 
-48 xUnit tests in [`tests/ShiftIt.Tests`](tests/ShiftIt.Tests) cover the move
+61 xUnit tests in [`tests/ShiftIt.Tests`](tests/ShiftIt.Tests) cover the move
 logic (mirroring, conflict skip, hash verification, no temp leftovers), the
 scanner (age filtering, empty-folder pruning, missing hot root, `MinAge=0`,
-pair abort, parallelism), error classification, the retry policy, and
+pair abort, parallelism), failure quarantine (stops retrying and re-logging a
+persistently failing file), error classification, the retry policy, and
 configuration validation. Bad-situation coverage includes a missing source, an
 exclusively locked source, and an unreachable archive drive.
 
@@ -255,7 +277,7 @@ ShiftIt.sln
 │   ├── Program.cs               Host, DI, options validation, Windows Service
 │   ├── Worker.cs                PeriodicTimer sweep loop
 │   ├── Configuration/           ArchiveOptions + validator
-│   └── Services/                ArchiveScanner, FileMover, FileErrors, Resilience
+│   └── Services/                ArchiveScanner, FileMover, FailureTracker, FileErrors, Resilience
 ├── tests/ShiftIt.Tests/         xUnit tests
 └── benchmarks/ShiftIt.Benchmarks/  BenchmarkDotNet suite
 ```
