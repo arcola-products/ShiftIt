@@ -37,15 +37,18 @@ public sealed class ArchiveScanner : IArchiveScanner
     private readonly IFileMover _mover;
     private readonly IOptionsMonitor<ArchiveOptions> _options;
     private readonly ILogger<ArchiveScanner> _logger;
+    private readonly IFailureTracker _failures;
 
     public ArchiveScanner(
         IFileMover mover,
         IOptionsMonitor<ArchiveOptions> options,
-        ILogger<ArchiveScanner> logger)
+        ILogger<ArchiveScanner> logger,
+        IFailureTracker? failures = null)
     {
         _mover = mover;
         _options = options;
         _logger = logger;
+        _failures = failures ?? new FailureTracker(options);
     }
 
     public async Task RunSweepAsync(CancellationToken cancellationToken)
@@ -102,6 +105,16 @@ public sealed class ArchiveScanner : IArchiveScanner
             await Parallel.ForEachAsync(eligible, parallelOptions, async (fileInfo, token) =>
             {
                 var source = fileInfo.FullName;
+
+                // Files that have failed too many times are skipped without a
+                // mover call or a log line, so a stuck set is not retried — or
+                // re-logged — on every sweep.
+                if (_failures.IsQuarantined(source, fileInfo.LastWriteTimeUtc))
+                {
+                    stats.IncQuarantined();
+                    return;
+                }
+
                 var relativePath = Path.GetRelativePath(hotRoot, source);
                 var destination = Path.Combine(archiveRoot, relativePath);
                 var destinationDir = Path.GetDirectoryName(destination)!;
@@ -119,16 +132,27 @@ public sealed class ArchiveScanner : IArchiveScanner
                 {
                     case MoveResult.Moved:
                         stats.IncMoved();
+                        _failures.Clear(source);
                         emptiedDirs.TryAdd(Path.GetDirectoryName(source)!, 0);
                         break;
                     case MoveResult.Copied:
                         stats.IncCopied(); // source kept, so the folder isn't emptied
+                        _failures.Clear(source);
                         break;
                     case MoveResult.SkippedExists:
                         stats.IncSkipped();
+                        _failures.Clear(source);
                         break;
                     default:
                         stats.IncFailed();
+                        var count = _failures.RecordFailure(source, fileInfo.LastWriteTimeUtc);
+                        if (count == options.MaxFileFailures)
+                        {
+                            // Log once, as it crosses into quarantine — not every sweep.
+                            _logger.LogWarning(
+                                "Quarantining {Source} after {Count} failed attempts; it will be skipped until it changes or the service restarts.",
+                                source, count);
+                        }
                         break;
                 }
             });
@@ -285,20 +309,22 @@ public sealed class ArchiveScanner : IArchiveScanner
         if (abortReason is not null)
         {
             _logger.LogWarning(
-                "[{Pair}] Sweep aborted ({Reason}): {Moved} moved, {Copied} copied, {Skipped} skipped, {Failed} failed before stopping.",
-                pair, abortReason, stats.Moved, stats.Copied, stats.Skipped, stats.Failed);
+                "[{Pair}] Sweep aborted ({Reason}): {Moved} moved, {Copied} copied, {Skipped} skipped, {Failed} failed, {Quarantined} quarantined before stopping.",
+                pair, abortReason, stats.Moved, stats.Copied, stats.Skipped, stats.Failed, stats.Quarantined);
         }
         else if (stats.Failed > 0)
         {
             _logger.LogWarning(
-                "[{Pair}] Sweep completed with errors: {Moved} moved, {Copied} copied, {Skipped} skipped, {Failed} failed.",
-                pair, stats.Moved, stats.Copied, stats.Skipped, stats.Failed);
+                "[{Pair}] Sweep completed with errors: {Moved} moved, {Copied} copied, {Skipped} skipped, {Failed} failed, {Quarantined} quarantined.",
+                pair, stats.Moved, stats.Copied, stats.Skipped, stats.Failed, stats.Quarantined);
         }
         else
         {
+            // No new failures this sweep. Reported at Information even when files
+            // remain quarantined, so a steady stuck set doesn't warn every sweep.
             _logger.LogInformation(
-                "[{Pair}] Sweep complete: {Moved} moved, {Copied} copied, {Skipped} skipped, {Failed} failed.",
-                pair, stats.Moved, stats.Copied, stats.Skipped, stats.Failed);
+                "[{Pair}] Sweep complete: {Moved} moved, {Copied} copied, {Skipped} skipped, {Failed} failed, {Quarantined} quarantined.",
+                pair, stats.Moved, stats.Copied, stats.Skipped, stats.Failed, stats.Quarantined);
         }
     }
 
@@ -385,15 +411,18 @@ public sealed class ArchiveScanner : IArchiveScanner
         private int _copied;
         private int _skipped;
         private int _failed;
+        private int _quarantined;
 
         public int Moved => Volatile.Read(ref _moved);
         public int Copied => Volatile.Read(ref _copied);
         public int Skipped => Volatile.Read(ref _skipped);
         public int Failed => Volatile.Read(ref _failed);
+        public int Quarantined => Volatile.Read(ref _quarantined);
 
         public void IncMoved() => Interlocked.Increment(ref _moved);
         public void IncCopied() => Interlocked.Increment(ref _copied);
         public void IncSkipped() => Interlocked.Increment(ref _skipped);
         public void IncFailed() => Interlocked.Increment(ref _failed);
+        public void IncQuarantined() => Interlocked.Increment(ref _quarantined);
     }
 }

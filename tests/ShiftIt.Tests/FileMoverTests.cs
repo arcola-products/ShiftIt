@@ -114,9 +114,12 @@ public sealed class FileMoverTests
         Assert.False(File.Exists(destination));
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task MoveAsync_AbortsPair_WhenSourceLockedExclusively()
     {
+        Skip.IfNot(OperatingSystem.IsWindows(),
+            "Exclusive file-share locking (FileShare.None blocking reads) is Windows-specific.");
+
         using var hot = new TempDir();
         using var archive = new TempDir();
         var source = hot.WriteFile("locked.txt", "data");
