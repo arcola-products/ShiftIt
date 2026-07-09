@@ -1,0 +1,63 @@
+name: Release
+
+# Cuts a release when master contains a <Version> (in src/ShiftIt/ShiftIt.csproj)
+# that has not been released yet. Bump the version and merge to master to publish;
+# ordinary commits that don't change the version are no-ops.
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release (win-x64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need existing tags to tell if this version is already released
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Read version
+        id: v
+        shell: bash
+        run: |
+          version=$(dotnet msbuild src/ShiftIt/ShiftIt.csproj -getProperty:Version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse "v$version" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "v$version already released; nothing to do."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "v$version is new; will build and release."
+          fi
+
+      - name: Test
+        if: steps.v.outputs.exists == 'false'
+        run: dotnet test --configuration Release
+
+      - name: Publish (self-contained win-x64)
+        if: steps.v.outputs.exists == 'false'
+        run: dotnet publish src/ShiftIt -c Release -r win-x64 --self-contained true -o publish
+
+      - name: Package
+        if: steps.v.outputs.exists == 'false'
+        shell: pwsh
+        run: Compress-Archive -Path publish/* -DestinationPath "ShiftIt-${{ steps.v.outputs.tag }}-win-x64.zip"
+
+      - name: Create GitHub Release
+        if: steps.v.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          name: ShiftIt ${{ steps.v.outputs.tag }}
+          files: ShiftIt-${{ steps.v.outputs.tag }}-win-x64.zip
+          generate_release_notes: true

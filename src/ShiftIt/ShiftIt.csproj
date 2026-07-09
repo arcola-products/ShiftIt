@@ -6,6 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>ShiftIt</RootNamespace>
     <AssemblyName>ShiftIt</AssemblyName>
+    <!-- Bump this and merge to master to cut a release (see .github/workflows/release.yml). -->
+    <Version>1.0.0</Version>
     <UserSecretsId>dotnet-ShiftIt-fc566521-0422-4d2f-8ca4-6da6ba7b7306</UserSecretsId>
   </PropertyGroup>
 
