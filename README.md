@@ -144,6 +144,17 @@ Remove with `sc.exe delete ShiftIt`.
 > Using a downloaded release zip instead? Skip the `dotnet publish` step and
 > point `-BinaryPathName` at the `ShiftIt.exe` inside the extracted folder.
 
+### Cutting a release
+
+Releases are produced by CI, not by hand. Bump `<Version>` in
+[`src/ShiftIt/ShiftIt.csproj`](src/ShiftIt/ShiftIt.csproj) and merge to
+`master`: the [release workflow](.github/workflows/release.yml) sees the new
+version, builds the self-contained `win-x64` package, and publishes a GitHub
+Release tagged `vX.Y.Z` with `ShiftIt-vX.Y.Z-win-x64.zip` attached. Commits that
+don't change the version are no-ops, so it never releases twice for the same
+version. Every push and PR is also built and tested on Windows and Linux by the
+[CI workflow](.github/workflows/ci.yml).
+
 ## Logging
 
 Two destinations, deliberately scoped so each stays useful:
